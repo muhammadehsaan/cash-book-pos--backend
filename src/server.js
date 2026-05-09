@@ -44,6 +44,15 @@ async function ensureDatabaseReady() {
 app.use(cors());
 app.use(express.json());
 
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "dashboard-backend",
+    message: "Backend is running. Use /api/health to check database status.",
+    endpoints: ["/api/health", "/api/dashboard/overview"]
+  });
+});
+
 app.get("/api/health", async (_req, res) => {
   await ensureDatabaseReady();
   res.json({ ok: true, service: "dashboard-backend", databaseReady: dbStatus.ready, databaseMessage: dbStatus.message });

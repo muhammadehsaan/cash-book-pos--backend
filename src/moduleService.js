@@ -8,7 +8,7 @@ const moduleConfig = {
   },
   purchases: {
     table: "purchases",
-    fields: ["party_no", "bill_no", "purchase_date", "item_name", "supplier", "quantity", "rate", "amount", "payment_method", "note"],
+    fields: ["bill_no", "purchase_date", "item_name", "supplier", "quantity", "rate", "amount", "payment_method", "note"],
     orderBy: "purchase_date DESC, id DESC"
   },
   sales: {
@@ -18,18 +18,13 @@ const moduleConfig = {
   },
   parties: {
     table: "parties",
-    fields: ["party_name", "phone", "opening_debit", "opening_credit", "opening_balance", "opening_date", "balance", "party_type"],
+    fields: ["party_name", "opening_debit", "opening_credit", "opening_balance", "opening_date", "balance", "party_type"],
     orderBy: "id DESC"
   },
   items: {
     table: "items",
-    fields: ["item_name", "category", "stock", "unit_price"],
+    fields: ["lot_no", "item_name", "stock", "unit_price"],
     orderBy: "id DESC"
-  },
-  reminders: {
-    table: "reminders",
-    fields: ["title", "note", "due_date", "status"],
-    orderBy: "due_date ASC, id DESC"
   }
 };
 
@@ -39,6 +34,53 @@ function getConfig(moduleName) {
     throw new Error("Invalid module");
   }
   return config;
+}
+
+function cleanName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeName(value) {
+  return cleanName(value).toLowerCase();
+}
+
+async function getCanonicalPartyName(name) {
+  const normalizedName = normalizeName(name);
+
+  if (!normalizedName) {
+    return "";
+  }
+
+  const [partyResult, purchaseResult] = await Promise.all([
+    pool.query("SELECT party_name AS name FROM parties WHERE party_name <> '' ORDER BY id DESC LIMIT 500"),
+    pool.query("SELECT supplier AS name FROM purchases WHERE supplier <> '' ORDER BY id DESC LIMIT 500")
+  ]);
+  const existing = [...partyResult.rows, ...purchaseResult.rows].find((row) => normalizeName(row.name) === normalizedName);
+
+  return existing ? cleanName(existing.name) : cleanName(name);
+}
+
+async function assertUniquePartyName(name, id = null) {
+  const normalizedName = normalizeName(name);
+
+  if (!normalizedName) {
+    return;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT id
+      FROM parties
+      WHERE LOWER(REGEXP_REPLACE(TRIM(party_name), '\\s+', ' ', 'g')) = $1
+        AND ($2::int IS NULL OR id <> $2::int)
+      LIMIT 1;
+    `,
+    [normalizedName, id]
+  );
+
+  if (result.rowCount > 0) {
+    throw new Error("Party name already exists. Existing party select karein instead of duplicate name.");
+  }
 }
 
 async function getRows(moduleName) {
@@ -59,7 +101,13 @@ async function createRow(moduleName, payload) {
     normalizedPayload.amount = Number((quantity * rate).toFixed(2));
   }
 
+  if (moduleName === "purchases") {
+    normalizedPayload.supplier = await getCanonicalPartyName(payload.supplier);
+  }
+
   if (moduleName === "parties") {
+    await assertUniquePartyName(payload.party_name);
+
     const openingDebit = Number(payload.opening_debit || 0);
     const openingCredit = Number(payload.opening_credit || 0);
     const openingBalance = Number((openingDebit - openingCredit).toFixed(2));
@@ -69,6 +117,7 @@ async function createRow(moduleName, payload) {
     normalizedPayload.opening_balance = openingBalance;
     normalizedPayload.balance = openingBalance;
     normalizedPayload.opening_date = payload.opening_date || new Date().toISOString().slice(0, 10);
+    normalizedPayload.party_name = cleanName(payload.party_name);
   }
 
   const values = fields.map((field) => normalizedPayload[field]);
@@ -94,7 +143,13 @@ async function updateRow(moduleName, id, payload) {
     normalizedPayload.amount = Number((quantity * rate).toFixed(2));
   }
 
+  if (moduleName === "purchases") {
+    normalizedPayload.supplier = await getCanonicalPartyName(payload.supplier);
+  }
+
   if (moduleName === "parties") {
+    await assertUniquePartyName(payload.party_name, id);
+
     const openingDebit = Number(payload.opening_debit || 0);
     const openingCredit = Number(payload.opening_credit || 0);
     const openingBalance = Number((openingDebit - openingCredit).toFixed(2));
@@ -104,6 +159,7 @@ async function updateRow(moduleName, id, payload) {
     normalizedPayload.opening_balance = openingBalance;
     normalizedPayload.balance = openingBalance;
     normalizedPayload.opening_date = payload.opening_date || new Date().toISOString().slice(0, 10);
+    normalizedPayload.party_name = cleanName(payload.party_name);
   }
 
   const assignments = fields.map((field, index) => `${field} = $${index + 1}`).join(", ");

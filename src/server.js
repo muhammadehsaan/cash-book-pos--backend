@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const { getOverview } = require("./dashboardService");
 const { getRows, createRow, updateRow, deleteRow, getConfig } = require("./moduleService");
@@ -14,6 +14,43 @@ const dbStatus = {
   message: "Database not initialized yet."
 };
 let dbInitPromise = null;
+let lastDbWarning = "";
+
+function getRequiredFields(moduleName, fields) {
+  if (moduleName === "purchases" || moduleName === "sales") {
+    return fields.filter((field) => field !== "amount");
+  }
+
+  if (moduleName === "parties") {
+    return fields.filter((field) => !["opening_debit", "opening_credit", "opening_balance", "balance"].includes(field));
+  }
+
+  return fields;
+}
+
+function getErrorMessage(error) {
+  if (!error) {
+    return "Unknown error";
+  }
+
+  if (error.message) {
+    return error.message;
+  }
+
+  if (error.code) {
+    return `PostgreSQL error code ${error.code}`;
+  }
+
+  if (Array.isArray(error.errors) && error.errors.length > 0) {
+    return error.errors.map(getErrorMessage).join("; ");
+  }
+
+  if (error.cause) {
+    return getErrorMessage(error.cause);
+  }
+
+  return String(error);
+}
 
 async function ensureDatabaseReady() {
   if (dbStatus.ready) {
@@ -28,9 +65,14 @@ async function ensureDatabaseReady() {
         return true;
       })
       .catch((error) => {
+        const warning = getErrorMessage(error);
+
         dbStatus.ready = false;
         dbStatus.message = "PostgreSQL connection failed. Update backend/.env DATABASE_URL with the correct username, password and database.";
-        console.error("Database initialization warning:", error.message);
+        if (warning !== lastDbWarning) {
+          console.error("Database initialization warning:", warning);
+          lastDbWarning = warning;
+        }
         return false;
       })
       .finally(() => {
@@ -95,10 +137,7 @@ app.post("/api/:module", async (req, res) => {
     const moduleName = req.params.module;
     const { fields } = getConfig(moduleName);
     const payload = {};
-    const requiredFields =
-      moduleName === "purchases" || moduleName === "sales"
-        ? fields.filter((field) => field !== "amount")
-        : fields;
+    const requiredFields = getRequiredFields(moduleName, fields);
 
     for (const field of fields) {
       payload[field] = req.body[field];
@@ -123,10 +162,7 @@ app.put("/api/:module/:id", async (req, res) => {
     const moduleName = req.params.module;
     const { fields } = getConfig(moduleName);
     const payload = {};
-    const requiredFields =
-      moduleName === "purchases" || moduleName === "sales"
-        ? fields.filter((field) => field !== "amount")
-        : fields;
+    const requiredFields = getRequiredFields(moduleName, fields);
 
     for (const field of fields) {
       payload[field] = req.body[field];
